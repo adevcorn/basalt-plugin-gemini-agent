@@ -1,0 +1,404 @@
+//! gemini-agent — Basalt plugin providing the Gemini CLI agent launcher.
+//!
+//! Provides: agent-launcher:gemini
+//! Parses:   gemini --output-format stream-json   (NDJSON, one JSON object per line)
+
+use basalt_plugin_sdk::prelude::*;
+
+basalt_plugin_meta! {
+    name:              "gemini-agent",
+    version:           "0.1.0",
+    hook_flags:        CAP_AGENT_LAUNCHER,
+    provides:          "agent-launcher:gemini",
+    requires:          "",
+    file_globs:        "",
+    activates_on:      "",
+    activation_events: "",
+}
+
+// ---------------------------------------------------------------------------
+// agent_metadata
+// ---------------------------------------------------------------------------
+
+#[basalt_plugin]
+fn agent_metadata() -> AgentMetadata {
+    AgentMetadata {
+        name: "Gemini CLI".into(),
+        executable: "/opt/homebrew/bin/gemini".into(),
+        args: vec!["-y".into(), "--output-format".into(), "stream-json".into()],
+        // New session: pass the prompt via -p
+        resume_new_args: vec![
+            "-y".into(),
+            "--output-format".into(),
+            "stream-json".into(),
+            "-p".into(),
+            "{prompt}".into(),
+        ],
+        // Resume: -r <session_id> -p <prompt>
+        resume_cont_args: vec![
+            "-y".into(),
+            "--output-format".into(),
+            "stream-json".into(),
+            "-r".into(),
+            "{session_id}".into(),
+            "-p".into(),
+            "{prompt}".into(),
+        ],
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Parser state
+// ---------------------------------------------------------------------------
+
+/// Opaque state blob encoding:
+/// `[current_msg_vendor_id_len: u16 LE][current_msg_vendor_id bytes]`
+/// A zero-length id means there is no open message entry.
+struct ParseState {
+    current_message_vendor_id: Option<String>,
+}
+
+impl ParseState {
+    fn decode(state: &[u8]) -> Self {
+        if state.len() < 2 {
+            return Self {
+                current_message_vendor_id: None,
+            };
+        }
+        let len = u16::from_le_bytes([state[0], state[1]]) as usize;
+        if len == 0 || 2 + len > state.len() {
+            return Self {
+                current_message_vendor_id: None,
+            };
+        }
+        let id = std::str::from_utf8(&state[2..2 + len])
+            .ok()
+            .map(|s| s.to_string());
+        Self {
+            current_message_vendor_id: id,
+        }
+    }
+
+    fn encode(&self) -> Vec<u8> {
+        match &self.current_message_vendor_id {
+            None => vec![0u8, 0u8],
+            Some(id) => {
+                let bytes = id.as_bytes();
+                let len = bytes.len().min(0xFFFF) as u16;
+                let mut out = Vec::with_capacity(2 + len as usize);
+                out.extend_from_slice(&len.to_le_bytes());
+                out.extend_from_slice(&bytes[..len as usize]);
+                out
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// agent_parse_line
+// ---------------------------------------------------------------------------
+
+#[basalt_plugin]
+fn agent_parse_line(line: &[u8], state: &[u8]) -> (Vec<u8>, Vec<AgentEvent>) {
+    let Ok(line_str) = std::str::from_utf8(line) else {
+        return (state.to_vec(), vec![]);
+    };
+    let line_str = line_str.trim();
+    if line_str.is_empty() {
+        return (state.to_vec(), vec![]);
+    }
+
+    let mut ps = ParseState::decode(state);
+    let events = parse_gemini_line(line_str, &mut ps);
+    (ps.encode(), events)
+}
+
+fn parse_gemini_line(line: &str, ps: &mut ParseState) -> Vec<AgentEvent> {
+    let type_val = match json_str(line, "type") {
+        Some(t) => t,
+        None => return vec![],
+    };
+
+    match type_val.as_str() {
+        "tool_use" => {
+            ps.current_message_vendor_id = None;
+            let tool_name = json_str(line, "tool_name").unwrap_or_default();
+            let tool_id = json_str(line, "tool_id").unwrap_or_default();
+            if tool_id.is_empty() {
+                return vec![];
+            }
+
+            let params_raw = json_object_raw(line, "parameters").unwrap_or_default();
+            let raw_cmd = params_kv_string(&params_raw);
+            let tool_display = tool_display_name(&tool_name, &params_raw);
+            let category = gemini_category(&tool_name);
+            let file_paths = gemini_file_paths(&params_raw);
+
+            vec![AgentEvent::NewEntry {
+                vendor_id: tool_id,
+                tool: tool_display,
+                category,
+                raw_cmd,
+                file_paths,
+            }]
+        }
+
+        "tool_result" => {
+            ps.current_message_vendor_id = None;
+            let tool_id = match json_str(line, "tool_id") {
+                Some(id) => id,
+                None => return vec![],
+            };
+            let status = json_str(line, "status").unwrap_or_else(|| "success".into());
+            let exit_code = if status == "success" { 0i32 } else { 1i32 };
+            vec![AgentEvent::CloseEntry {
+                vendor_id: tool_id,
+                exit_code,
+                output_lines: vec![],
+            }]
+        }
+
+        "result" => {
+            ps.current_message_vendor_id = None;
+            let status = json_str(line, "status").unwrap_or_else(|| "success".into());
+            vec![AgentEvent::SessionEnded {
+                success: status == "success",
+            }]
+        }
+
+        "init" => {
+            if let Some(sid) = json_str(line, "session_id") {
+                vec![AgentEvent::SessionIDAvailable(sid)]
+            } else {
+                vec![]
+            }
+        }
+
+        "message" => {
+            let role = json_str(line, "role").unwrap_or_default();
+            let content = json_str(line, "content").unwrap_or_default();
+            let trimmed: String = content.trim().to_string();
+            if role != "assistant" || trimmed.is_empty() {
+                return vec![];
+            }
+
+            if let Some(ref vid) = ps.current_message_vendor_id.clone() {
+                vec![AgentEvent::AppendToEntry {
+                    vendor_id: vid.clone(),
+                    text: trimmed,
+                }]
+            } else {
+                // Synthesise a stable vendor_id for this message batch.
+                let vid = format!("msg:{}", trimmed.len());
+                ps.current_message_vendor_id = Some(vid.clone());
+                vec![AgentEvent::NewEntry {
+                    vendor_id: vid,
+                    tool: trimmed,
+                    category: "message".into(),
+                    raw_cmd: String::new(),
+                    file_paths: vec![],
+                }]
+            }
+        }
+
+        _ => vec![],
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Minimal JSON helpers (no external dependencies)
+// ---------------------------------------------------------------------------
+
+/// Extract a JSON string field value by key from a flat JSON object line.
+fn json_str(json: &str, key: &str) -> Option<String> {
+    let needle = format!("\"{}\"", key);
+    let pos = json.find(needle.as_str())?;
+    let after_key = &json[pos + needle.len()..];
+    let colon = after_key.find(':')? + 1;
+    let rest = after_key[colon..].trim_start();
+    if rest.starts_with('"') {
+        parse_json_string(&rest[1..])
+    } else {
+        None
+    }
+}
+
+/// Parse a JSON string starting after the opening quote, handling \n, \t, \", \\.
+fn parse_json_string(s: &str) -> Option<String> {
+    let mut out = String::new();
+    let mut chars = s.chars();
+    loop {
+        match chars.next()? {
+            '"' => return Some(out),
+            '\\' => match chars.next()? {
+                'n' => out.push('\n'),
+                't' => out.push('\t'),
+                'r' => out.push('\r'),
+                c => out.push(c),
+            },
+            c => out.push(c),
+        }
+    }
+}
+
+/// Extract the raw text of a JSON object value for `key` (returns the braces and interior).
+fn json_object_raw(json: &str, key: &str) -> Option<String> {
+    let needle = format!("\"{}\"", key);
+    let pos = json.find(needle.as_str())?;
+    let after_key = &json[pos + needle.len()..];
+    let colon = after_key.find(':')? + 1;
+    let rest = after_key[colon..].trim_start();
+    if !rest.starts_with('{') {
+        return None;
+    }
+    // Find matching closing brace.
+    let mut depth = 0usize;
+    let mut end = 0usize;
+    for (i, c) in rest.char_indices() {
+        match c {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    end = i + 1;
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    if end == 0 {
+        None
+    } else {
+        Some(rest[..end].to_string())
+    }
+}
+
+/// Turn a JSON object's key-value pairs into a "key=value ..." summary string.
+fn params_kv_string(obj: &str) -> String {
+    if obj.len() < 2 {
+        return String::new();
+    }
+    let inner = &obj[1..obj.len().saturating_sub(1)];
+    let mut parts: Vec<String> = Vec::new();
+    let mut rest = inner;
+    while let Some(key) = json_str(&format!("{{{}}}", rest), "") // parse first key
+        .or_else(|| {
+            // fallback: scan for "key":
+            let ki = rest.find('"')?;
+            let after = &rest[ki + 1..];
+            let ke = after.find('"')?;
+            Some(after[..ke].to_string())
+        })
+    {
+        let kn = format!("\"{}\"", key);
+        let Some(kpos) = rest.find(kn.as_str()) else {
+            break;
+        };
+        rest = &rest[kpos + kn.len()..];
+        let Some(cp) = rest.find(':') else { break };
+        rest = rest[cp + 1..].trim_start();
+        let val: String = if rest.starts_with('"') {
+            let v = parse_json_string(&rest[1..]).unwrap_or_default();
+            let vlen = v.len() + 2 + v.chars().filter(|&c| c == '"' || c == '\\').count();
+            rest = &rest[vlen.min(rest.len())..];
+            v.chars().take(40).collect()
+        } else {
+            let end = rest.find([',', '}', ']'].as_ref()).unwrap_or(rest.len());
+            let v = rest[..end].trim().to_string();
+            rest = &rest[end.min(rest.len())..];
+            v
+        };
+        parts.push(format!("{}={}", key, val));
+        if let Some(comma) = rest.find(',') {
+            rest = &rest[comma + 1..];
+        } else {
+            break;
+        }
+    }
+    parts.join(" ")
+}
+
+fn tool_display_name(tool_name: &str, params_raw: &str) -> String {
+    let base: String = tool_name
+        .split('_')
+        .map(|w| {
+            let mut c = w.chars();
+            match c.next() {
+                None => String::new(),
+                Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    // Append the primary path param if present.
+    for key in &["file_path", "path", "dir_path"] {
+        let needle = format!("\"{}\"", key);
+        if let Some(_) = params_raw.find(needle.as_str()) {
+            if let Some(path) = json_str(
+                &format!("{{{}}}", &params_raw[1..params_raw.len().saturating_sub(1)]),
+                key,
+            ) {
+                let filename = path.rsplit('/').next().unwrap_or(&path);
+                return format!("{} {}", base, filename);
+            }
+        }
+    }
+    base
+}
+
+fn gemini_category(tool_name: &str) -> String {
+    let n = tool_name.to_lowercase();
+    if n.contains("read") || n.contains("list") || n.contains("get") {
+        return "read".into();
+    }
+    if n.contains("search") || n.contains("find") {
+        return "search".into();
+    }
+    if n.contains("write")
+        || n.contains("create")
+        || n.contains("delete")
+        || n.contains("edit")
+        || n.contains("replace")
+        || n.contains("move")
+    {
+        return "write".into();
+    }
+    if n.contains("run")
+        || n.contains("exec")
+        || n.contains("shell")
+        || n.contains("bash")
+        || n.contains("command")
+    {
+        return "run".into();
+    }
+    if n.contains("web") || n.contains("fetch") || n.contains("http") {
+        return "web".into();
+    }
+    "tool".into()
+}
+
+fn gemini_file_paths(params_raw: &str) -> Vec<String> {
+    let mut paths = Vec::new();
+    // Extract the inner part of the params object to scan keys
+    let inner = if params_raw.starts_with('{') && params_raw.ends_with('}') {
+        &params_raw[1..params_raw.len() - 1]
+    } else {
+        params_raw
+    };
+    for key in &[
+        "file_path",
+        "path",
+        "dir_path",
+        "source_path",
+        "destination_path",
+    ] {
+        if let Some(p) = json_str(&format!("{{{}}}", inner), key) {
+            if !p.is_empty() {
+                paths.push(p);
+            }
+        }
+    }
+    paths
+}
