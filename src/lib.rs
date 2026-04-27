@@ -51,49 +51,6 @@ fn agent_metadata() -> AgentMetadata {
 // Parser state
 // ---------------------------------------------------------------------------
 
-/// Opaque state blob encoding:
-/// `[current_msg_vendor_id_len: u16 LE][current_msg_vendor_id bytes]`
-/// A zero-length id means there is no open message entry.
-struct ParseState {
-    current_message_vendor_id: Option<String>,
-}
-
-impl ParseState {
-    fn decode(state: &[u8]) -> Self {
-        if state.len() < 2 {
-            return Self {
-                current_message_vendor_id: None,
-            };
-        }
-        let len = u16::from_le_bytes([state[0], state[1]]) as usize;
-        if len == 0 || 2 + len > state.len() {
-            return Self {
-                current_message_vendor_id: None,
-            };
-        }
-        let id = std::str::from_utf8(&state[2..2 + len])
-            .ok()
-            .map(|s| s.to_string());
-        Self {
-            current_message_vendor_id: id,
-        }
-    }
-
-    fn encode(&self) -> Vec<u8> {
-        match &self.current_message_vendor_id {
-            None => vec![0u8, 0u8],
-            Some(id) => {
-                let bytes = id.as_bytes();
-                let len = bytes.len().min(0xFFFF) as u16;
-                let mut out = Vec::with_capacity(2 + len as usize);
-                out.extend_from_slice(&len.to_le_bytes());
-                out.extend_from_slice(&bytes[..len as usize]);
-                out
-            }
-        }
-    }
-}
-
 // ---------------------------------------------------------------------------
 // agent_parse_line
 // ---------------------------------------------------------------------------
@@ -108,12 +65,11 @@ fn agent_parse_line(line: &[u8], state: &[u8]) -> (Vec<u8>, Vec<AgentEvent>) {
         return (state.to_vec(), vec![]);
     }
 
-    let mut ps = ParseState::decode(state);
-    let events = parse_gemini_line(line_str, &mut ps);
-    (ps.encode(), events)
+    let events = parse_gemini_line(line_str);
+    (state.to_vec(), events)
 }
 
-fn parse_gemini_line(line: &str, ps: &mut ParseState) -> Vec<AgentEvent> {
+fn parse_gemini_line(line: &str) -> Vec<AgentEvent> {
     let type_val = match json_str(line, "type") {
         Some(t) => t,
         None => return vec![],
@@ -121,7 +77,6 @@ fn parse_gemini_line(line: &str, ps: &mut ParseState) -> Vec<AgentEvent> {
 
     match type_val.as_str() {
         "tool_use" => {
-            ps.current_message_vendor_id = None;
             let tool_name = json_str(line, "tool_name").unwrap_or_default();
             let tool_id = json_str(line, "tool_id").unwrap_or_default();
             if tool_id.is_empty() {
@@ -144,7 +99,6 @@ fn parse_gemini_line(line: &str, ps: &mut ParseState) -> Vec<AgentEvent> {
         }
 
         "tool_result" => {
-            ps.current_message_vendor_id = None;
             let tool_id = match json_str(line, "tool_id") {
                 Some(id) => id,
                 None => return vec![],
@@ -159,7 +113,6 @@ fn parse_gemini_line(line: &str, ps: &mut ParseState) -> Vec<AgentEvent> {
         }
 
         "result" => {
-            ps.current_message_vendor_id = None;
             let status = json_str(line, "status").unwrap_or_else(|| "success".into());
             vec![AgentEvent::SessionEnded {
                 success: status == "success",
@@ -174,32 +127,7 @@ fn parse_gemini_line(line: &str, ps: &mut ParseState) -> Vec<AgentEvent> {
             }
         }
 
-        "message" => {
-            let role = json_str(line, "role").unwrap_or_default();
-            let content = json_str(line, "content").unwrap_or_default();
-            let trimmed: String = content.trim().to_string();
-            if role != "assistant" || trimmed.is_empty() {
-                return vec![];
-            }
-
-            if let Some(ref vid) = ps.current_message_vendor_id.clone() {
-                vec![AgentEvent::AppendToEntry {
-                    vendor_id: vid.clone(),
-                    text: trimmed,
-                }]
-            } else {
-                // Synthesise a stable vendor_id for this message batch.
-                let vid = format!("msg:{}", trimmed.len());
-                ps.current_message_vendor_id = Some(vid.clone());
-                vec![AgentEvent::NewEntry {
-                    vendor_id: vid,
-                    tool: trimmed,
-                    category: "message".into(),
-                    raw_cmd: String::new(),
-                    file_paths: vec![],
-                }]
-            }
-        }
+        "message" => vec![],
 
         _ => vec![],
     }
