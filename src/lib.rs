@@ -129,7 +129,7 @@ fn parse_gemini_line(line: &str, ps: &mut ParseState) -> Vec<AgentEvent> {
             }
 
             let params_raw = json_object_raw(line, "parameters").unwrap_or_default();
-            let raw_cmd = params_kv_string(&params_raw);
+            let raw_cmd = human_raw_cmd(&tool_name, &params_raw);
             let tool_display = tool_display_name(&tool_name, &params_raw);
             let category = gemini_category(&tool_name);
             let file_paths = gemini_file_paths(&params_raw);
@@ -320,17 +320,7 @@ fn params_kv_string(obj: &str) -> String {
 }
 
 fn tool_display_name(tool_name: &str, params_raw: &str) -> String {
-    let base: String = tool_name
-        .split('_')
-        .map(|w| {
-            let mut c = w.chars();
-            match c.next() {
-                None => String::new(),
-                Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ");
+    let base = prettify_tool_name(tool_name);
 
     // Append the primary path param if present.
     for key in &["file_path", "path", "dir_path"] {
@@ -346,6 +336,150 @@ fn tool_display_name(tool_name: &str, params_raw: &str) -> String {
         }
     }
     base
+}
+
+fn human_raw_cmd(tool_name: &str, params_raw: &str) -> String {
+    let lower = tool_name.to_lowercase();
+    let base = prettify_tool_name(tool_name);
+
+    let file_path = param_value(params_raw, "file_path");
+    let path = param_value(params_raw, "path");
+    let dir_path = param_value(params_raw, "dir_path");
+    let src_path = param_value(params_raw, "source_path");
+    let dst_path = param_value(params_raw, "destination_path");
+    let command = first_present(
+        params_raw,
+        &["command", "cmd", "shell_command", "bash_command", "script"],
+    );
+    let query = first_present(params_raw, &["query", "pattern", "search_term", "regex"]);
+    let content = first_present(params_raw, &["content", "text", "replacement", "new_text"]);
+    let file_target = file_path.as_deref().or(path.as_deref());
+    let dir_target = dir_path.as_deref().or(path.as_deref());
+    let any_target = file_path
+        .as_deref()
+        .or(path.as_deref())
+        .or(dir_path.as_deref());
+
+    if lower.contains("run")
+        || lower.contains("exec")
+        || lower.contains("shell")
+        || lower.contains("bash")
+        || lower.contains("command")
+    {
+        return command.unwrap_or_else(|| fallback_with_params(&base, params_raw));
+    }
+
+    if lower.contains("move") {
+        return match (src_path, dst_path) {
+            (Some(src), Some(dst)) => format!("Move {src} -> {dst}"),
+            _ => fallback_with_params(&base, params_raw),
+        };
+    }
+
+    if lower.contains("delete") {
+        return match any_target {
+            Some(target) => format!("Delete {target}"),
+            None => fallback_with_params(&base, params_raw),
+        };
+    }
+
+    if lower.contains("create") {
+        return match any_target {
+            Some(target) => format!("Create {target}"),
+            None => fallback_with_params(&base, params_raw),
+        };
+    }
+
+    if lower.contains("write") || lower.contains("edit") || lower.contains("replace") {
+        return match file_target {
+            Some(target) => {
+                let suffix = content
+                    .as_deref()
+                    .map(compact_snippet)
+                    .filter(|s| !s.is_empty())
+                    .map(|snippet| format!(" ({snippet})"))
+                    .unwrap_or_default();
+                format!("Write {target}{suffix}")
+            }
+            None => fallback_with_params(&base, params_raw),
+        };
+    }
+
+    if lower.contains("read") || lower.contains("get") {
+        return match file_target {
+            Some(target) => format!("Read {target}"),
+            None => fallback_with_params(&base, params_raw),
+        };
+    }
+
+    if lower.contains("list") {
+        return match dir_target {
+            Some(target) => format!("List {target}"),
+            None => fallback_with_params(&base, params_raw),
+        };
+    }
+
+    if lower.contains("search") || lower.contains("find") {
+        return match query {
+            Some(q) => {
+                if let Some(target) = any_target {
+                    format!("Search {target} for {}", compact_snippet(&q))
+                } else {
+                    format!("Search for {}", compact_snippet(&q))
+                }
+            }
+            None => fallback_with_params(&base, params_raw),
+        };
+    }
+
+    fallback_with_params(&base, params_raw)
+}
+
+fn prettify_tool_name(tool_name: &str) -> String {
+    tool_name
+        .split('_')
+        .map(|w| {
+            let mut c = w.chars();
+            match c.next() {
+                None => String::new(),
+                Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn param_value(params_raw: &str, key: &str) -> Option<String> {
+    if !(params_raw.starts_with('{') && params_raw.ends_with('}')) {
+        return None;
+    }
+    json_str(
+        &format!("{{{}}}", &params_raw[1..params_raw.len() - 1]),
+        key,
+    )
+    .filter(|s| !s.is_empty())
+}
+
+fn first_present(params_raw: &str, keys: &[&str]) -> Option<String> {
+    keys.iter().find_map(|key| param_value(params_raw, key))
+}
+
+fn compact_snippet(value: &str) -> String {
+    let single_line = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    if single_line.chars().count() <= 48 {
+        return single_line;
+    }
+    let shortened: String = single_line.chars().take(45).collect();
+    format!("{shortened}...")
+}
+
+fn fallback_with_params(base: &str, params_raw: &str) -> String {
+    let params = params_kv_string(params_raw);
+    if params.is_empty() {
+        base.to_string()
+    } else {
+        format!("{base}: {params}")
+    }
 }
 
 fn gemini_category(tool_name: &str) -> String {
