@@ -7,7 +7,7 @@ use basalt_plugin_sdk::prelude::*;
 
 basalt_plugin_meta! {
     name:              "gemini-agent",
-    version:           "0.1.0",
+    version:           env!("CARGO_PKG_VERSION"),
     hook_flags:        CAP_AGENT_LAUNCHER,
     provides:          "agent-launcher:gemini",
     requires:          "",
