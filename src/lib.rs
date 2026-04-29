@@ -31,18 +31,29 @@ fn agent_metadata() -> AgentMetadata {
             "-y".into(),
             "--output-format".into(),
             "stream-json".into(),
+            "--skip-trust".into(),
             "-p".into(),
             "{prompt}".into(),
         ],
-        // Resume: -r <session_id> -p <prompt>
+        // Resume the recorded Gemini session and continue it with a positional prompt.
         resume_cont_args: vec![
             "-y".into(),
             "--output-format".into(),
             "stream-json".into(),
-            "-r".into(),
+            "--skip-trust".into(),
+            "--resume".into(),
             "{session_id}".into(),
-            "-p".into(),
             "{prompt}".into(),
+        ],
+        execution_tier: AgentExecutionTier::StructuredDirect,
+        workspace_capabilities: vec![
+            "speculative-edits".into(),
+            "approval-required".into(),
+            "utf8-text".into(),
+            "create".into(),
+            "delete".into(),
+            "rename".into(),
+            "materialized-copy".into(),
         ],
     }
 }
@@ -50,6 +61,24 @@ fn agent_metadata() -> AgentMetadata {
 // ---------------------------------------------------------------------------
 // Parser state
 // ---------------------------------------------------------------------------
+
+struct ParseState {
+    open_message: bool,
+    open_thought: bool,
+}
+
+impl ParseState {
+    fn decode(state: &[u8]) -> Self {
+        Self {
+            open_message: state.first().copied().unwrap_or(0) != 0,
+            open_thought: state.get(1).copied().unwrap_or(0) != 0,
+        }
+    }
+
+    fn encode(&self) -> Vec<u8> {
+        vec![self.open_message as u8, self.open_thought as u8]
+    }
+}
 
 // ---------------------------------------------------------------------------
 // agent_parse_line
@@ -65,11 +94,12 @@ fn agent_parse_line(line: &[u8], state: &[u8]) -> (Vec<u8>, Vec<AgentEvent>) {
         return (state.to_vec(), vec![]);
     }
 
-    let events = parse_gemini_line(line_str);
-    (state.to_vec(), events)
+    let mut parse_state = ParseState::decode(state);
+    let events = parse_gemini_line(line_str, &mut parse_state);
+    (parse_state.encode(), events)
 }
 
-fn parse_gemini_line(line: &str) -> Vec<AgentEvent> {
+fn parse_gemini_line(line: &str, parse_state: &mut ParseState) -> Vec<AgentEvent> {
     let type_val = match json_str(line, "type") {
         Some(t) => t,
         None => return vec![],
@@ -114,6 +144,8 @@ fn parse_gemini_line(line: &str) -> Vec<AgentEvent> {
 
         "result" => {
             let status = json_str(line, "status").unwrap_or_else(|| "success".into());
+            parse_state.open_message = false;
+            parse_state.open_thought = false;
             vec![AgentEvent::SessionEnded {
                 success: status == "success",
             }]
@@ -127,10 +159,177 @@ fn parse_gemini_line(line: &str) -> Vec<AgentEvent> {
             }
         }
 
-        "message" => vec![],
+        "message" => parse_message_event(line, parse_state),
 
         _ => vec![],
     }
+}
+
+fn parse_message_event(line: &str, parse_state: &mut ParseState) -> Vec<AgentEvent> {
+    let role = json_str(line, "role").unwrap_or_default().to_lowercase();
+    if role == "user" || role == "system" {
+        return vec![];
+    }
+
+    let text = json_str(line, "content")
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    if text.is_empty() {
+        return vec![];
+    }
+
+    if !role.contains("thought") {
+        let embedded = parse_embedded_thought_segments(&text);
+        if embedded.len() > 1 {
+            return emit_embedded_segments(embedded, parse_state);
+        }
+    }
+
+    let (vendor_id, category, is_open) = if role.contains("thought") {
+        ("gemini-thought", "thought", &mut parse_state.open_thought)
+    } else {
+        ("gemini-message", "message", &mut parse_state.open_message)
+    };
+
+    if !*is_open {
+        *is_open = true;
+        return vec![AgentEvent::NewEntry {
+            vendor_id: vendor_id.into(),
+            tool: text,
+            category: category.into(),
+            raw_cmd: String::new(),
+            file_paths: vec![],
+        }];
+    }
+
+    vec![AgentEvent::AppendToEntry {
+        vendor_id: vendor_id.into(),
+        text,
+    }]
+}
+
+fn emit_embedded_segments(
+    segments: Vec<(bool, String)>,
+    parse_state: &mut ParseState,
+) -> Vec<AgentEvent> {
+    let mut events = Vec::new();
+    let mut last_was_thought = false;
+
+    for (is_thought, text) in segments {
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let vendor_id = if is_thought {
+            "gemini-thought"
+        } else {
+            "gemini-message"
+        };
+        let category = if is_thought { "thought" } else { "message" };
+
+        events.push(AgentEvent::NewEntry {
+            vendor_id: vendor_id.into(),
+            tool: trimmed.to_string(),
+            category: category.into(),
+            raw_cmd: String::new(),
+            file_paths: vec![],
+        });
+
+        last_was_thought = is_thought;
+    }
+
+    parse_state.open_message = !last_was_thought;
+    parse_state.open_thought = last_was_thought;
+    events
+}
+
+fn parse_embedded_thought_segments(text: &str) -> Vec<(bool, String)> {
+    let mut segments = Vec::new();
+    let mut cursor = 0usize;
+    let mut current_is_thought = false;
+
+    while let Some((start, end)) = find_thought_marker(text, cursor) {
+        let prefix = text[cursor..start].trim();
+        if !prefix.is_empty() {
+            segments.push((current_is_thought, prefix.to_string()));
+        }
+        current_is_thought = true;
+        cursor = end;
+    }
+
+    let tail = text[cursor..].trim();
+    if !tail.is_empty() {
+        segments.push((current_is_thought, tail.to_string()));
+    }
+
+    if segments.is_empty() {
+        segments.push((false, text.trim().to_string()));
+    }
+
+    segments
+}
+
+fn find_thought_marker(text: &str, from: usize) -> Option<(usize, usize)> {
+    let bytes = text.as_bytes();
+    let mut i = from;
+
+    while i < bytes.len() {
+        if bytes[i] != b'[' {
+            i += 1;
+            continue;
+        }
+
+        let mut j = i + 1;
+        while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+            j += 1;
+        }
+
+        if !ascii_starts_with_ignore_case(&bytes[j..], b"thought") {
+            i += 1;
+            continue;
+        }
+        j += "thought".len();
+
+        while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+            j += 1;
+        }
+        if j >= bytes.len() || bytes[j] != b':' {
+            i += 1;
+            continue;
+        }
+        j += 1;
+
+        while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+            j += 1;
+        }
+        if !ascii_starts_with_ignore_case(&bytes[j..], b"true") {
+            i += 1;
+            continue;
+        }
+        j += "true".len();
+
+        while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+            j += 1;
+        }
+        if j >= bytes.len() || bytes[j] != b']' {
+            i += 1;
+            continue;
+        }
+
+        return Some((i, j + 1));
+    }
+
+    None
+}
+
+fn ascii_starts_with_ignore_case(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack.len() >= needle.len()
+        && haystack[..needle.len()]
+            .iter()
+            .zip(needle.iter())
+            .all(|(a, b)| a.eq_ignore_ascii_case(b))
 }
 
 // ---------------------------------------------------------------------------

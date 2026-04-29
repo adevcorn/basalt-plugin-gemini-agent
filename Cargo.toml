@@ -9,4 +9,4 @@ edition = "2021"
 crate-type = ["cdylib"]
 
 [dependencies]
-basalt-plugin-sdk = { git = "https://github.com/adevcorn/basalt-plugin-sdk", tag = "v0.1.0" }
+basalt-plugin-sdk = { git = "https://github.com/adevcorn/basalt-plugin-sdk", rev = "d2ca8de" }
