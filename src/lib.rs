@@ -611,19 +611,25 @@ fn fallback_with_params(base: &str, params_raw: &str) -> String {
 
 fn gemini_category(tool_name: &str) -> String {
     let n = tool_name.to_lowercase();
-    if n.contains("read") || n.contains("list") || n.contains("get") {
+    if n.contains("list") {
+        return "list".into();
+    }
+    if n.contains("read") || n.contains("get") {
         return "read".into();
     }
     if n.contains("search") || n.contains("find") {
         return "search".into();
     }
-    if n.contains("write")
-        || n.contains("create")
-        || n.contains("delete")
-        || n.contains("edit")
-        || n.contains("replace")
-        || n.contains("move")
-    {
+    if n.contains("move") || n.contains("rename") {
+        return "move".into();
+    }
+    if n.contains("delete") || n.contains("remove") {
+        return "delete".into();
+    }
+    if n.contains("create") || n.contains("mkdir") {
+        return "create".into();
+    }
+    if n.contains("write") || n.contains("edit") || n.contains("replace") {
         return "write".into();
     }
     if n.contains("run")
@@ -631,13 +637,13 @@ fn gemini_category(tool_name: &str) -> String {
         || n.contains("shell")
         || n.contains("bash")
         || n.contains("command")
+        || n.contains("web")
+        || n.contains("fetch")
+        || n.contains("http")
     {
         return "run".into();
     }
-    if n.contains("web") || n.contains("fetch") || n.contains("http") {
-        return "web".into();
-    }
-    "tool".into()
+    "run".into()
 }
 
 fn gemini_file_paths(params_raw: &str) -> Vec<String> {
