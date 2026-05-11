@@ -611,6 +611,10 @@ fn fallback_with_params(base: &str, params_raw: &str) -> String {
 
 fn gemini_category(tool_name: &str) -> String {
     let n = tool_name.to_lowercase();
+    // Gemini built-in strategy/reasoning tool — surface as thought.
+    if n == "update_topic" {
+        return "thought".into();
+    }
     if n.contains("list") {
         return "list".into();
     }
