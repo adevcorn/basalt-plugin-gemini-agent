@@ -5,7 +5,7 @@ version = 4
 [[package]]
 name = "basalt-plugin-sdk"
 version = "0.1.1"
-source = "git+https://github.com/adevcorn/basalt-plugin-sdk?rev=d2ca8de#d2ca8de9a28916093c2909161fb5d7f53312d7a8"
+source = "git+https://github.com/adevcorn/basalt-plugin-sdk?rev=5c18264#5c182642b410bd385adbed27aec6cb15e4cfe12c"
 dependencies = [
  "basalt-plugin-sdk-macros",
 ]
@@ -13,7 +13,7 @@ dependencies = [
 [[package]]
 name = "basalt-plugin-sdk-macros"
 version = "0.1.0"
-source = "git+https://github.com/adevcorn/basalt-plugin-sdk?rev=d2ca8de#d2ca8de9a28916093c2909161fb5d7f53312d7a8"
+source = "git+https://github.com/adevcorn/basalt-plugin-sdk?rev=5c18264#5c182642b410bd385adbed27aec6cb15e4cfe12c"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -22,7 +22,7 @@ dependencies = [
 
 [[package]]
 name = "gemini-agent"
-version = "0.1.1"
+version = "0.1.3"
 dependencies = [
  "basalt-plugin-sdk",
 ]

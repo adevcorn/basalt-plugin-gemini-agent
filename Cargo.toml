@@ -2,11 +2,11 @@
 
 [package]
 name    = "gemini-agent"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2021"
 
 [lib]
 crate-type = ["cdylib"]
 
 [dependencies]
-basalt-plugin-sdk = { git = "https://github.com/adevcorn/basalt-plugin-sdk", rev = "d2ca8de" }
+basalt-plugin-sdk = { git = "https://github.com/adevcorn/basalt-plugin-sdk", rev = "5c18264" }
