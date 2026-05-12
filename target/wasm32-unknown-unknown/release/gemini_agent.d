@@ -1,0 +1,1 @@
+/Users/aavu/repositories/github.com/basalt-collection/basalt-plugin-gemini-agent/target/wasm32-unknown-unknown/release/gemini_agent.wasm: /Users/aavu/repositories/github.com/basalt-collection/basalt-plugin-gemini-agent/src/lib.rs
