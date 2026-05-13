@@ -80,7 +80,7 @@ fn agent_metadata() -> AgentMetadata {
 // ---------------------------------------------------------------------------
 
 #[basalt_plugin]
-fn agent_environment() -> Vec<(&\'static str, &\'static str)> {
+fn agent_environment() -> Vec<(&'static str, &'static str)> {
     vec![]
 }
 
@@ -126,20 +126,20 @@ fn agent_parse_line(line: &[u8], state: &[u8]) -> (Vec<u8>, Vec<AgentEvent>) {
 }
 
 fn parse_gemini_line(line: &str, parse_state: &mut ParseState) -> Vec<AgentEvent> {
-    let type_val = match json_str(line, \"type\") {
+    let type_val = match json_str(line, "type") {
         Some(t) => t,
         None => return vec![],
     };
 
     match type_val.as_str() {
-        \"tool_use\" => {
-            let tool_name = json_str(line, \"tool_name\").unwrap_or_default();
-            let tool_id = json_str(line, \"tool_id\").unwrap_or_default();
+        "tool_use" => {
+            let tool_name = json_str(line, "tool_name").unwrap_or_default();
+            let tool_id = json_str(line, "tool_id").unwrap_or_default();
             if tool_id.is_empty() {
                 return vec![];
             }
 
-            let params_raw = json_object_raw(line, \"parameters\").unwrap_or_default();
+            let params_raw = json_object_raw(line, "parameters").unwrap_or_default();
             let raw_cmd = human_raw_cmd(&tool_name, &params_raw);
             let tool_display = tool_display_name(&tool_name, &params_raw);
             let category = gemini_category(&tool_name);
@@ -154,13 +154,13 @@ fn parse_gemini_line(line: &str, parse_state: &mut ParseState) -> Vec<AgentEvent
             }]
         }
 
-        \"tool_result\" => {
-            let tool_id = match json_str(line, \"tool_id\") {
+        "tool_result" => {
+            let tool_id = match json_str(line, "tool_id") {
                 Some(id) => id,
                 None => return vec![],
             };
-            let status = json_str(line, \"status\").unwrap_or_else(|| \"success\".into());
-            let exit_code = if status == \"success\" { 0i32 } else { 1i32 };
+            let status = json_str(line, "status").unwrap_or_else(|| "success".into());
+            let exit_code = if status == "success" { 0i32 } else { 1i32 };
             vec![AgentEvent::CloseEntry {
                 vendor_id: tool_id,
                 exit_code,
@@ -168,36 +168,36 @@ fn parse_gemini_line(line: &str, parse_state: &mut ParseState) -> Vec<AgentEvent
             }]
         }
 
-        \"result\" => {
-            let status = json_str(line, \"status\").unwrap_or_else(|| \"success\".into());
+        "result" => {
+            let status = json_str(line, "status").unwrap_or_else(|| "success".into());
             parse_state.open_message = false;
             parse_state.open_thought = false;
             vec![AgentEvent::SessionEnded {
-                success: status == \"success\",
+                success: status == "success",
             }]
         }
 
-        \"init\" => {
-            if let Some(sid) = json_str(line, \"session_id\") {
+        "init" => {
+            if let Some(sid) = json_str(line, "session_id") {
                 vec![AgentEvent::SessionIDAvailable(sid)]
             } else {
                 vec![]
             }
         }
 
-        \"message\" => parse_message_event(line, parse_state),
+        "message" => parse_message_event(line, parse_state),
 
         _ => vec![],
     }
 }
 
 fn parse_message_event(line: &str, parse_state: &mut ParseState) -> Vec<AgentEvent> {
-    let role = json_str(line, \"role\").unwrap_or_default().to_lowercase();
-    if role == \"user\" || role == \"system\" {
+    let role = json_str(line, "role").unwrap_or_default().to_lowercase();
+    if role == "user" || role == "system" {
         return vec![];
     }
 
-    let text = json_str(line, \"content\")
+    let text = json_str(line, "content")
         .unwrap_or_default()
         .trim()
         .to_string();
@@ -205,17 +205,17 @@ fn parse_message_event(line: &str, parse_state: &mut ParseState) -> Vec<AgentEve
         return vec![];
     }
 
-    if !role.contains(\"thought\") {
+    if !role.contains("thought") {
         let embedded = parse_embedded_thought_segments(&text);
         if embedded.len() > 1 {
             return emit_embedded_segments(embedded, parse_state);
         }
     }
 
-    let (vendor_id, category, is_open) = if role.contains(\"thought\") {
-        (\"gemini-thought\", \"thought\", &mut parse_state.open_thought)
+    let (vendor_id, category, is_open) = if role.contains("thought") {
+        ("gemini-thought", "thought", &mut parse_state.open_thought)
     } else {
-        (\"gemini-message\", \"message\", &mut parse_state.open_message)
+        ("gemini-message", "message", &mut parse_state.open_message)
     };
 
     if !*is_open {
@@ -249,11 +249,11 @@ fn emit_embedded_segments(
         }
 
         let vendor_id = if is_thought {
-            \"gemini-thought\"
+            "gemini-thought"
         } else {
-            \"gemini-message\"
+            "gemini-message"
         };
-        let category = if is_thought { \"thought\" } else { \"message\" };
+        let category = if is_thought { "thought" } else { "message" };
 
         events.push(AgentEvent::NewEntry {
             vendor_id: vendor_id.into(),
@@ -302,44 +302,44 @@ fn find_thought_marker(text: &str, from: usize) -> Option<(usize, usize)> {
     let mut i = from;
 
     while i < bytes.len() {
-        if bytes[i] != b\"[\"[0] {
+        if bytes[i] != b'[' {
             i += 1;
             continue;
         }
 
         let mut j = i + 1;
-        while j < bytes.len() && (bytes[j] as char).is_whitespace() {
+        while j < bytes.len() && bytes[j].is_ascii_whitespace() {
             j += 1;
         }
 
-        if !ascii_starts_with_ignore_case(&bytes[j..], b\"thought\") {
+        if !ascii_starts_with_ignore_case(&bytes[j..], b"thought") {
             i += 1;
             continue;
         }
-        j += \"thought\".len();
+        j += "thought".len();
 
-        while j < bytes.len() && (bytes[j] as char).is_whitespace() {
+        while j < bytes.len() && bytes[j].is_ascii_whitespace() {
             j += 1;
         }
-        if j >= bytes.len() || bytes[j] != b\":\"[0] {
+        if j >= bytes.len() || bytes[j] != b':' {
             i += 1;
             continue;
         }
         j += 1;
 
-        while j < bytes.len() && (bytes[j] as char).is_whitespace() {
+        while j < bytes.len() && bytes[j].is_ascii_whitespace() {
             j += 1;
         }
-        if !ascii_starts_with_ignore_case(&bytes[j..], b\"true\") {
+        if !ascii_starts_with_ignore_case(&bytes[j..], b"true") {
             i += 1;
             continue;
         }
-        j += \"true\".len();
+        j += "true".len();
 
-        while j < bytes.len() && (bytes[j] as char).is_whitespace() {
+        while j < bytes.len() && bytes[j].is_ascii_whitespace() {
             j += 1;
         }
-        if j >= bytes.len() || bytes[j] != b\"]\"[0] {
+        if j >= bytes.len() || bytes[j] != b']' {
             i += 1;
             continue;
         }
@@ -358,31 +358,35 @@ fn ascii_starts_with_ignore_case(haystack: &[u8], needle: &[u8]) -> bool {
             .all(|(a, b)| a.eq_ignore_ascii_case(b))
 }
 
+// ---------------------------------------------------------------------------
+// Minimal JSON helpers (no external dependencies)
+// ---------------------------------------------------------------------------
+
 /// Extract a JSON string field value by key from a flat JSON object line.
 fn json_str(json: &str, key: &str) -> Option<String> {
-    let needle = format!(\"\\\"{}\\\"\", key);
+    let needle = format!("\"{}\"", key);
     let pos = json.find(needle.as_str())?;
     let after_key = &json[pos + needle.len()..];
-    let colon = after_key.find(\":\")? + 1;
+    let colon = after_key.find(':')? + 1;
     let rest = after_key[colon..].trim_start();
-    if rest.starts_with(\"\\\"\") {
+    if rest.starts_with('"') {
         parse_json_string(&rest[1..])
     } else {
         None
     }
 }
 
-/// Parse a JSON string starting after the opening quote, handling \\n, \\t, \\\", \\\\.
+/// Parse a JSON string starting after the opening quote, handling \n, \t, \", \\.
 fn parse_json_string(s: &str) -> Option<String> {
     let mut out = String::new();
     let mut chars = s.chars();
     loop {
         match chars.next()? {
-            \"\\\"\" => return Some(out),
-            \"\\\\\" => match chars.next()? {
-                \"n\" => out.push(\"\\n\"[0]),
-                \"t\" => out.push(\"\\t\"[0]),
-                \"r\" => out.push(\"\\r\"[0]),
+            '"' => return Some(out),
+            '\\' => match chars.next()? {
+                'n' => out.push('\n'),
+                't' => out.push('\t'),
+                'r' => out.push('\r'),
                 c => out.push(c),
             },
             c => out.push(c),
@@ -392,12 +396,12 @@ fn parse_json_string(s: &str) -> Option<String> {
 
 /// Extract the raw text of a JSON object value for `key` (returns the braces and interior).
 fn json_object_raw(json: &str, key: &str) -> Option<String> {
-    let needle = format!(\"\\\"{}\\\"\", key);
+    let needle = format!("\"{}\"", key);
     let pos = json.find(needle.as_str())?;
     let after_key = &json[pos + needle.len()..];
-    let colon = after_key.find(\":\")? + 1;
+    let colon = after_key.find(':')? + 1;
     let rest = after_key[colon..].trim_start();
-    if !rest.starts_with(\"{\") {
+    if !rest.starts_with('{') {
         return None;
     }
     // Find matching closing brace.
@@ -405,8 +409,8 @@ fn json_object_raw(json: &str, key: &str) -> Option<String> {
     let mut end = 0usize;
     for (i, c) in rest.char_indices() {
         match c {
-            \"{\" => depth += 1,
-            \"}\" => {
+            '{' => depth += 1,
+            '}' => {
                 depth -= 1;
                 if depth == 0 {
                     end = i + 1;
@@ -423,7 +427,7 @@ fn json_object_raw(json: &str, key: &str) -> Option<String> {
     }
 }
 
-/// Turn a JSON object\s key-value pairs into a \"key=value ...\" summary string.
+/// Turn a JSON object's key-value pairs into a "key=value ..." summary string.
 fn params_kv_string(obj: &str) -> String {
     if obj.len() < 2 {
         return String::new();
@@ -431,56 +435,56 @@ fn params_kv_string(obj: &str) -> String {
     let inner = &obj[1..obj.len().saturating_sub(1)];
     let mut parts: Vec<String> = Vec::new();
     let mut rest = inner;
-    while let Some(key) = json_str(&format!(\"{{{}}}\", rest), \"\") // parse first key
+    while let Some(key) = json_str(&format!("{{{}}}", rest), "") // parse first key
         .or_else(|| {
-            // fallback: scan for \"key\":
-            let ki = rest.find(\"\\\"\")?;
+            // fallback: scan for "key":
+            let ki = rest.find('"')?;
             let after = &rest[ki + 1..];
-            let ke = after.find(\"\\\"\")?;
+            let ke = after.find('"')?;
             Some(after[..ke].to_string())
         })
     {
-        let kn = format!(\"\\\"{}\\\"\", key);
+        let kn = format!("\"{}\"", key);
         let Some(kpos) = rest.find(kn.as_str()) else {
             break;
         };
         rest = &rest[kpos + kn.len()..];
-        let Some(cp) = rest.find(\":\") else { break };
+        let Some(cp) = rest.find(':') else { break };
         rest = rest[cp + 1..].trim_start();
-        let val: String = if rest.starts_with(\"\\\"\") {
+        let val: String = if rest.starts_with('"') {
             let v = parse_json_string(&rest[1..]).unwrap_or_default();
-            let vlen = v.len() + 2 + v.chars().filter(|&c| c == \"\\\"\" || c == \"\\\\\").count();
+            let vlen = v.len() + 2 + v.chars().filter(|&c| c == '"' || c == '\\').count();
             rest = &rest[vlen.min(rest.len())..];
             v.chars().take(40).collect()
         } else {
-            let end = rest.find([\",\", \"}\", \"]\"].as_ref()).unwrap_or(rest.len());
+            let end = rest.find([',', '}', ']'].as_ref()).unwrap_or(rest.len());
             let v = rest[..end].trim().to_string();
             rest = &rest[end.min(rest.len())..];
             v
         };
-        parts.push(format!(\"{}={}\", key, val));
-        if let Some(comma) = rest.find(\",\") {
+        parts.push(format!("{}={}", key, val));
+        if let Some(comma) = rest.find(',') {
             rest = &rest[comma + 1..];
         } else {
             break;
         }
     }
-    parts.join(\" \")
+    parts.join(" ")
 }
 
 fn tool_display_name(tool_name: &str, params_raw: &str) -> String {
     let base = prettify_tool_name(tool_name);
 
     // Append the primary path param if present.
-    for key in &[\"file_path\", \"path\", \"dir_path\"] {
-        let needle = format!(\"\\\"{}\\\"\", key);
+    for key in &["file_path", "path", "dir_path"] {
+        let needle = format!("\"{}\"", key);
         if let Some(_) = params_raw.find(needle.as_str()) {
             if let Some(path) = json_str(
-                &format!(\"{{{}}}\", &params_raw[1..params_raw.len().saturating_sub(1)]),
+                &format!("{{{}}}", &params_raw[1..params_raw.len().saturating_sub(1)]),
                 key,
             ) {
-                let filename = path.rsplit(\"/\").next().unwrap_or(&path);
-                return format!(\"{} {}\", base, filename);
+                let filename = path.rsplit('/').next().unwrap_or(&path);
+                return format!("{} {}", base, filename);
             }
         }
     }
@@ -491,17 +495,17 @@ fn human_raw_cmd(tool_name: &str, params_raw: &str) -> String {
     let lower = tool_name.to_lowercase();
     let base = prettify_tool_name(tool_name);
 
-    let file_path = param_value(params_raw, \"file_path\");
-    let path = param_value(params_raw, \"path\");
-    let dir_path = param_value(params_raw, \"dir_path\");
-    let src_path = param_value(params_raw, \"source_path\");
-    let dst_path = param_value(params_raw, \"destination_path\");
+    let file_path = param_value(params_raw, "file_path");
+    let path = param_value(params_raw, "path");
+    let dir_path = param_value(params_raw, "dir_path");
+    let src_path = param_value(params_raw, "source_path");
+    let dst_path = param_value(params_raw, "destination_path");
     let command = first_present(
         params_raw,
-        &[\"command\", \"cmd\", \"shell_command\", \"bash_command\", \"script\"],
+        &["command", "cmd", "shell_command", "bash_command", "script"],
     );
-    let query = first_present(params_raw, &[\"query\", \"pattern\", \"search_term\", \"regex\"]);
-    let content = first_present(params_raw, &[\"content\", \"text\", \"replacement\", \"new_text\"]);
+    let query = first_present(params_raw, &["query", "pattern", "search_term", "regex"]);
+    let content = first_present(params_raw, &["content", "text", "replacement", "new_text"]);
     let file_target = file_path.as_deref().or(path.as_deref());
     let dir_target = dir_path.as_deref().or(path.as_deref());
     let any_target = file_path
@@ -509,72 +513,72 @@ fn human_raw_cmd(tool_name: &str, params_raw: &str) -> String {
         .or(path.as_deref())
         .or(dir_path.as_deref());
 
-    if lower.contains(\"run\")
-        || lower.contains(\"exec\")
-        || lower.contains(\"shell\")
-        || lower.contains(\"bash\")
-        || lower.contains(\"command\")
+    if lower.contains("run")
+        || lower.contains("exec")
+        || lower.contains("shell")
+        || lower.contains("bash")
+        || lower.contains("command")
     {
         return command.unwrap_or_else(|| fallback_with_params(&base, params_raw));
     }
 
-    if lower.contains(\"move\") {
+    if lower.contains("move") {
         return match (src_path, dst_path) {
-            (Some(src), Some(dst)) => format!(\"Move {src} -> {dst}\"),
+            (Some(src), Some(dst)) => format!("Move {src} -> {dst}"),
             _ => fallback_with_params(&base, params_raw),
         };
     }
 
-    if lower.contains(\"delete\") {
+    if lower.contains("delete") {
         return match any_target {
-            Some(target) => format!(\"Delete {target}\"),
+            Some(target) => format!("Delete {target}"),
             None => fallback_with_params(&base, params_raw),
         };
     }
 
-    if lower.contains(\"create\") {
+    if lower.contains("create") {
         return match any_target {
-            Some(target) => format!(\"Create {target}\"),
+            Some(target) => format!("Create {target}"),
             None => fallback_with_params(&base, params_raw),
         };
     }
 
-    if lower.contains(\"write\") || lower.contains(\"edit\") || lower.contains(\"replace\") {
+    if lower.contains("write") || lower.contains("edit") || lower.contains("replace") {
         return match file_target {
             Some(target) => {
                 let suffix = content
                     .as_deref()
                     .map(compact_snippet)
                     .filter(|s| !s.is_empty())
-                    .map(|snippet| format!(\" ({snippet})\"))
+                    .map(|snippet| format!(" ({snippet})"))
                     .unwrap_or_default();
-                format!(\"Write {target}{suffix}\")
+                format!("Write {target}{suffix}")
             }
             None => fallback_with_params(&base, params_raw),
         };
     }
 
-    if lower.contains(\"read\") || lower.contains(\"get\") {
+    if lower.contains("read") || lower.contains("get") {
         return match file_target {
-            Some(target) => format!(\"Read {target}\"),
+            Some(target) => format!("Read {target}"),
             None => fallback_with_params(&base, params_raw),
         };
     }
 
-    if lower.contains(\"list\") {
+    if lower.contains("list") {
         return match dir_target {
-            Some(target) => format!(\"List {target}\"),
+            Some(target) => format!("List {target}"),
             None => fallback_with_params(&base, params_raw),
         };
     }
 
-    if lower.contains(\"search\") || lower.contains(\"find\") {
+    if lower.contains("search") || lower.contains("find") {
         return match query {
             Some(q) => {
                 if let Some(target) = any_target {
-                    format!(\"Search {target} for {}\", compact_snippet(&q))
+                    format!("Search {target} for {}", compact_snippet(&q))
                 } else {
-                    format!(\"Search for {}\", compact_snippet(&q))
+                    format!("Search for {}", compact_snippet(&q))
                 }
             }
             None => fallback_with_params(&base, params_raw),
@@ -586,7 +590,7 @@ fn human_raw_cmd(tool_name: &str, params_raw: &str) -> String {
 
 fn prettify_tool_name(tool_name: &str) -> String {
     tool_name
-        .split(\"_\")
+        .split('_')
         .map(|w| {
             let mut c = w.chars();
             match c.next() {
@@ -595,15 +599,15 @@ fn prettify_tool_name(tool_name: &str) -> String {
             }
         })
         .collect::<Vec<_>>()
-        .join(\" \")
+        .join(" ")
 }
 
 fn param_value(params_raw: &str, key: &str) -> Option<String> {
-    if !(params_raw.starts_with(\"{\") && params_raw.ends_with(\"}\")) {
+    if !(params_raw.starts_with('{') && params_raw.ends_with('}')) {
         return None;
     }
     json_str(
-        &format!(\"{{{}}}\", &params_raw[1..params_raw.len() - 1]),
+        &format!("{{{}}}", &params_raw[1..params_raw.len() - 1]),
         key,
     )
     .filter(|s| !s.is_empty())
@@ -614,12 +618,12 @@ fn first_present(params_raw: &str, keys: &[&str]) -> Option<String> {
 }
 
 fn compact_snippet(value: &str) -> String {
-    let single_line = value.split_whitespace().collect::<Vec<_>>().join(\" \");
+    let single_line = value.split_whitespace().collect::<Vec<_>>().join(" ");
     if single_line.chars().count() <= 48 {
         return single_line;
     }
     let shortened: String = single_line.chars().take(45).collect();
-    format!(\"{shortened}...\")
+    format!("{shortened}...")
 }
 
 fn fallback_with_params(base: &str, params_raw: &str) -> String {
@@ -627,67 +631,67 @@ fn fallback_with_params(base: &str, params_raw: &str) -> String {
     if params.is_empty() {
         base.to_string()
     } else {
-        format!(\"{base}: {params}\")
+        format!("{base}: {params}")
     }
 }
 
 fn gemini_category(tool_name: &str) -> String {
     let n = tool_name.to_lowercase();
     // Gemini built-in strategy/reasoning tool — surface as thought.
-    if n == \"update_topic\" {
-        return \"thought\".into();
+    if n == "update_topic" {
+        return "thought".into();
     }
-    if n.contains(\"list\") {
-        return \"list\".into();
+    if n.contains("list") {
+        return "list".into();
     }
-    if n.contains(\"read\") || n.contains(\"get\") {
-        return \"read\".into();
+    if n.contains("read") || n.contains("get") {
+        return "read".into();
     }
-    if n.contains(\"search\") || n.contains(\"find\") {
-        return \"search\".into();
+    if n.contains("search") || n.contains("find") {
+        return "search".into();
     }
-    if n.contains(\"move\") || n.contains(\"rename\") {
-        return \"move\".into();
+    if n.contains("move") || n.contains("rename") {
+        return "move".into();
     }
-    if n.contains(\"delete\") || n.contains(\"remove\") {
-        return \"delete\".into();
+    if n.contains("delete") || n.contains("remove") {
+        return "delete".into();
     }
-    if n.contains(\"create\") || n.contains(\"mkdir\") {
-        return \"create\".into();
+    if n.contains("create") || n.contains("mkdir") {
+        return "create".into();
     }
-    if n.contains(\"write\") || n.contains(\"edit\") || n.contains(\"replace\") {
-        return \"write\".into();
+    if n.contains("write") || n.contains("edit") || n.contains("replace") {
+        return "write".into();
     }
-    if n.contains(\"run\")
-        || n.contains(\"exec\")
-        || n.contains(\"shell\")
-        || n.contains(\"bash\")
-        || n.contains(\"command\")
-        || n.contains(\"web\")
-        || n.contains(\"fetch\")
-        || n.contains(\"http\")
+    if n.contains("run")
+        || n.contains("exec")
+        || n.contains("shell")
+        || n.contains("bash")
+        || n.contains("command")
+        || n.contains("web")
+        || n.contains("fetch")
+        || n.contains("http")
     {
-        return \"run\".into();
+        return "run".into();
     }
-    \"run\".into()
+    "run".into()
 }
 
 fn gemini_file_paths(params_raw: &str) -> Vec<String> {
     let mut paths = Vec::new();
     // Extract the inner part of the params object to scan keys
-    let inner = if params_raw.starts_with(\"{\") && params_raw.ends_with(\"}\") {
+    let inner = if params_raw.starts_with('{') && params_raw.ends_with('}') {
         &params_raw[1..params_raw.len() - 1]
     } else {
         params_raw
     };
     for key in &[
-        \"file_path\",
-        \"path\",
-        \"dir_path\",
-        \"source_path\",
-        \"destination_path\",
+        "file_path",
+        "path",
+        "dir_path",
+        "source_path",
+        "destination_path",
     ] {
-        if let Some(p) = json_str(&format!(\"{{{}}}\", inner), key) {
+        if let Some(p) = json_str(&format!("{{{}}}", inner), key) {
             if !p.is_empty() {
                 paths.push(p);
             }
